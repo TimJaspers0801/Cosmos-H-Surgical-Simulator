@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=cosmos-smoke
-#SBATCH --partition=gpu              # <-- adjust to your cluster's GPU partition
+#SBATCH --partition=express           # H200 partition (4h max, good for smoke test)
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gpus=1                     # 1x H200
+#SBATCH --gpus=h200:1                # 1x H200
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=128G
 #SBATCH --time=01:00:00              # smoke test should be quick

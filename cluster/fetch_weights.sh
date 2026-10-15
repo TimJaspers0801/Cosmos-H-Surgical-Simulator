@@ -42,6 +42,14 @@ if [ -z "${HF_TOKEN:-}" ]; then
     fi
 fi
 
+# ------------------------------------------------------------------
+# Ensure huggingface_hub is installed
+# ------------------------------------------------------------------
+if ! python3 -c "import huggingface_hub" 2>/dev/null; then
+    echo "Installing huggingface_hub ..."
+    pip install --user huggingface_hub
+fi
+
 mkdir -p "$WEIGHTS_DIR"
 
 # ------------------------------------------------------------------

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=cosmos-h-infer
-#SBATCH --partition=gpu              # <-- adjust to your cluster's GPU partition
+#SBATCH --partition=large             # H200 partition (also: express for 4h max)
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gpus=1                     # 1x H200
+#SBATCH --gpus=h200:1                # 1x H200
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=128G
 #SBATCH --time=08:00:00

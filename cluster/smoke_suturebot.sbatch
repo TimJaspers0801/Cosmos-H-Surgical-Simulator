@@ -4,8 +4,8 @@
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:h200:1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-gpu=12
-#SBATCH --mem-per-gpu=120G
+#SBATCH --cpus-per-gpu=4
+#SBATCH --mem-per-gpu=60G
 #SBATCH --time=0:30:00
 #SBATCH --output=/home/tjaspers/codex/logs/%x_%j.out
 #SBATCH --error=/home/tjaspers/codex/logs/%x_%j.err

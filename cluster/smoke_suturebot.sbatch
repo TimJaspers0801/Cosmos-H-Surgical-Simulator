@@ -67,12 +67,17 @@ if ! enroot list 2>/dev/null | grep -qx "${CONTAINER_NAME}"; then
 fi
 
 # ─── Run inference ───────────────────────────────────────────────────────
+# NVIDIA_VISIBLE_DEVICES / NVIDIA_DRIVER_CAPABILITIES tell the enroot
+# NVIDIA hook (libnvidia-container) to inject host GPU driver libs into
+# the container.  Without these, CUDA/flash_attn cannot load.
 enroot start --rw \
     --mount "${OPENH_ROOT}:/data" \
     --mount "${WEIGHTS_DIR}:/weights" \
     --mount "${COSMOS_OUT}:/out" \
     --mount "${HF_CACHE}:/hf" \
     --mount "${SCRIPTS_DIR}:/scripts" \
+    --env NVIDIA_VISIBLE_DEVICES=all \
+    --env NVIDIA_DRIVER_CAPABILITIES=all \
     --env HF_HOME=/hf \
     --env PYTHONPATH=/workspace \
     --env PATH=/workspace/.venv/bin:/usr/local/bin:/usr/bin:/bin \

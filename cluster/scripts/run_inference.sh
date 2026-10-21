@@ -78,6 +78,23 @@ if [ ! -f "$CKPT_PATH" ]; then
 fi
 
 # ===========================================================================
+# Patch tokenizer to use local weights instead of HF download
+# ===========================================================================
+# The HF repo nvidia/Cosmos-Predict2.5-2B no longer has tokenizer.pth at the
+# expected revision, causing a 404.  If we have tokenizer.pth mounted locally
+# (via /weights), rewrite the S3 URI defaults in the tokenizer source so that
+# get_checkpoint_path() treats it as a local file and skips the HF download.
+TOKENIZER_LOCAL="${TOKENIZER_PATH:-/weights/tokenizer.pth}"
+if [ -f "$TOKENIZER_LOCAL" ]; then
+    echo "Patching tokenizer defaults to use local: $TOKENIZER_LOCAL"
+    WAN1_S3="s3://bucket/cosmos_diffusion_v2/pretrain_weights/tokenizer/wan2pt1/Wan2.1_VAE.pth"
+    sed -i "s|${WAN1_S3}|${TOKENIZER_LOCAL}|g" \
+        /workspace/cosmos_predict2/_src/predict2/tokenizers/wan2pt1.py \
+        /workspace/cosmos_predict2/_src/predict2/tokenizers/cosmos.py \
+        2>/dev/null || true
+fi
+
+# ===========================================================================
 # Build optional flags
 # ===========================================================================
 COMPARISON_FLAG=""

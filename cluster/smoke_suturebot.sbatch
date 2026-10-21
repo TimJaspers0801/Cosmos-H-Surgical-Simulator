@@ -75,6 +75,7 @@ enroot start --rw \
     --mount "${SCRIPTS_DIR}:/scripts" \
     --env HF_HOME=/hf \
     --env PYTHONPATH=/workspace \
+    --env PATH=/workspace/.venv/bin:/usr/local/bin:/usr/bin:/bin \
     --env EMBODIMENTS="jhu_dvrk_mono:${SUTUREBOT}" \
     --env EPISODE_IDS="1306" \
     --env DATA_SPLIT="full" \

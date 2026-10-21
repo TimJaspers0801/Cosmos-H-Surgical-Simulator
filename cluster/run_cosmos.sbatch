@@ -137,9 +137,12 @@ enroot start --rw \
     --mount "${COSMOS_OUT}:/out" \
     --mount "${HF_CACHE}:/hf" \
     --mount "${SCRIPTS_DIR}:/scripts" \
+    --env NVIDIA_VISIBLE_DEVICES=all \
+    --env NVIDIA_DRIVER_CAPABILITIES=all \
     --env HF_HOME=/hf \
     --env HF_TOKEN="${HF_TOKEN}" \
     --env PYTHONPATH=/workspace \
+    --env PATH=/workspace/.venv/bin:/usr/local/bin:/usr/bin:/bin \
     --env EMBODIMENTS="${EMBODIMENTS}" \
     --env EPISODE_IDS="${EPISODE_IDS}" \
     --env DATA_SPLIT="${DATA_SPLIT}" \

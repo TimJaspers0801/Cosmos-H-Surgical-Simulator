@@ -65,6 +65,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import time
 
@@ -141,6 +142,17 @@ def parse_arguments() -> argparse.Namespace:
     # --- Inference arguments ---
     parser.add_argument("--guidance", type=float, default=0, help="Classifier-free guidance scale")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+
+    # --- Multi-sample (best-of-K) arguments ---
+    parser.add_argument(
+        "--sample_idx", type=int, default=-1,
+        help="Sample index for best-of-K generation (-1 = legacy single-sample mode). "
+             "When >= 0, output goes to episode_{id}/sample_{idx:02d}.mp4",
+    )
+    parser.add_argument(
+        "--manifest_path", type=str, default=None,
+        help="Path to write a JSON manifest of generated videos (for IDM probe joining)",
+    )
 
     # --- Output arguments ---
     parser.add_argument("--save_root", type=str, default="results/open_h_eval", help="Output directory")
@@ -311,6 +323,9 @@ def main():
     if args.save_comparison:
         os.makedirs(os.path.join(save_root, "comparison"), exist_ok=True)
 
+    multi_sample = args.sample_idx >= 0
+    manifest_rows = []
+
     # Performance tracking
     perf_stats = {
         "total_episodes": 0,
@@ -441,9 +456,34 @@ def main():
             predicted_video = np.concatenate(stitched_predicted, axis=0)
 
             # Save predicted video
-            pred_path = os.path.join(save_root, "predicted", f"episode_{episode_id:04d}.mp4")
+            if multi_sample:
+                ep_dir = os.path.join(save_root, "predicted", f"episode_{episode_id}")
+                os.makedirs(ep_dir, exist_ok=True)
+                pred_path = os.path.join(ep_dir, f"sample_{args.sample_idx:02d}.mp4")
+            else:
+                pred_path = os.path.join(save_root, "predicted", f"episode_{episode_id:04d}.mp4")
             mediapy.write_video(pred_path, predicted_video, fps=args.save_fps)
             logger.info(f"Saved predicted video to {pred_path}")
+
+            # Build manifest row
+            if multi_sample:
+                manifest_rows.append({
+                    "episode_id": episode_id,
+                    "sample_idx": args.sample_idx,
+                    "seed": args.seed,
+                    "path": pred_path,
+                    "n_chunks": len(chunk_indices),
+                    "context_len": 1,
+                    "horizon": CHUNK_SIZE,
+                    "delta_t": timestep_interval,
+                    "config": {
+                        "experiment": args.experiment,
+                        "guidance": args.guidance,
+                        "max_chunks": args.max_chunks,
+                        "save_fps": args.save_fps,
+                        "num_frames": NUM_FRAMES,
+                    },
+                })
 
             # Save comparison if requested
             if args.save_comparison:
@@ -455,7 +495,12 @@ def main():
                 min_len = min(len(gt_video), len(predicted_video))
                 comparison = np.concatenate([gt_video[:min_len], predicted_video[:min_len]], axis=2)
 
-                comp_path = os.path.join(save_root, "comparison", f"episode_{episode_id:04d}.mp4")
+                if multi_sample:
+                    comp_ep_dir = os.path.join(save_root, "comparison", f"episode_{episode_id}")
+                    os.makedirs(comp_ep_dir, exist_ok=True)
+                    comp_path = os.path.join(comp_ep_dir, f"sample_{args.sample_idx:02d}.mp4")
+                else:
+                    comp_path = os.path.join(save_root, "comparison", f"episode_{episode_id:04d}.mp4")
                 mediapy.write_video(comp_path, comparison, fps=args.save_fps)
                 logger.info(f"Saved comparison to {comp_path}")
 
@@ -489,6 +534,13 @@ def main():
         logger.info(f"Avg chunk time: {avg_chunk_time:.2f}s | Avg episode time: {avg_episode_time:.2f}s")
 
     logger.info("=" * 60)
+
+    # Write manifest if requested
+    if args.manifest_path and manifest_rows:
+        os.makedirs(os.path.dirname(args.manifest_path) or ".", exist_ok=True)
+        with open(args.manifest_path, "w") as f:
+            json.dump(manifest_rows, f, indent=2)
+        logger.info(f"Wrote manifest ({len(manifest_rows)} rows) to {args.manifest_path}")
 
     video2world.cleanup()
 

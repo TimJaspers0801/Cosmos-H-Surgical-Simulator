@@ -23,6 +23,8 @@
 #   SAVE_FPS        -- output video FPS                 (default: 10)
 #   MAX_CHUNKS      -- max autoregressive chunks/ep     (default: 20)
 #   SAVE_COMPARISON -- set to "1" for GT-vs-pred video  (default: 0)
+#   SAMPLE_IDX      -- sample index for best-of-K      (default: -1 = legacy)
+#   MANIFEST_PATH   -- path for JSON manifest output    (default: none)
 #   EXPERIMENT      -- experiment config name           (default: release config)
 #   EXCLUDE_SPLITS_<EMBODIMENT> -- per-embodiment split exclusions
 set -euo pipefail
@@ -44,6 +46,8 @@ SEED="${SEED:-42}"
 SAVE_FPS="${SAVE_FPS:-10}"
 MAX_CHUNKS="${MAX_CHUNKS:-20}"
 SAVE_COMPARISON="${SAVE_COMPARISON:-0}"
+SAMPLE_IDX="${SAMPLE_IDX:--1}"
+MANIFEST_PATH="${MANIFEST_PATH:-}"
 
 # PYTHONPATH must include the repo root (/workspace in STANDALONE image).
 export PYTHONPATH="${PYTHONPATH:-/workspace}"
@@ -102,6 +106,16 @@ if [ "${SAVE_COMPARISON}" = "1" ]; then
     COMPARISON_FLAG="--save_comparison"
 fi
 
+SAMPLE_FLAG=""
+if [ "${SAMPLE_IDX}" != "-1" ]; then
+    SAMPLE_FLAG="--sample_idx ${SAMPLE_IDX}"
+fi
+
+MANIFEST_FLAG=""
+if [ -n "${MANIFEST_PATH}" ]; then
+    MANIFEST_FLAG="--manifest_path ${MANIFEST_PATH}"
+fi
+
 echo "=== Cosmos-H-Surgical-Simulator Inference ==="
 echo "Checkpoint:  $CKPT_PATH"
 echo "Output root: /out"
@@ -112,6 +126,8 @@ echo "Guidance:    $GUIDANCE"
 echo "Seed:        $SEED"
 echo "Max chunks:  $MAX_CHUNKS"
 echo "Save FPS:    $SAVE_FPS"
+echo "Sample idx:  $SAMPLE_IDX"
+echo "Manifest:    ${MANIFEST_PATH:-<none>}"
 echo ""
 
 # ===========================================================================
@@ -143,6 +159,7 @@ for PAIR in $EMBODIMENTS; do
     fi
 
     # inference_open_h.py writes to <save_root>/<embodiment>/predicted/episode_XXXX.mp4
+    # With --sample_idx >= 0: <save_root>/<embodiment>/predicted/episode_<id>/sample_<idx>.mp4
     # We pass /out as --save_root so output lands at /out/<embodiment>/predicted/
     echo ""
     echo "Running: python3 inference_open_h.py --embodiment $EMBODIMENT --save_root /out ..."
@@ -159,13 +176,16 @@ for PAIR in $EMBODIMENTS; do
         --save_fps "$SAVE_FPS" \
         --max_chunks "$MAX_CHUNKS" \
         $COMPARISON_FLAG \
-        $EXCLUDE_FLAG
+        $EXCLUDE_FLAG \
+        $SAMPLE_FLAG \
+        $MANIFEST_FLAG
 
     # ---------------------------------------------------------------
     # Verify output was written
     # ---------------------------------------------------------------
     PRED_DIR="/out/${EMBODIMENT}/predicted"
-    MP4_COUNT=$(find "$PRED_DIR" -maxdepth 1 -name '*.mp4' 2>/dev/null | wc -l)
+    # In multi-sample mode, mp4s are in subdirectories; search recursively
+    MP4_COUNT=$(find "$PRED_DIR" -name '*.mp4' 2>/dev/null | wc -l)
     echo ""
     echo "Output directory: $PRED_DIR"
     if [ "$MP4_COUNT" -eq 0 ]; then
@@ -174,8 +194,8 @@ for PAIR in $EMBODIMENTS; do
         echo "      Check the log above for 'Episode X not found' or 'doesn't start at base_index=0'."
         FAILED=1
     else
-        echo "OK: $MP4_COUNT mp4 file(s) written to $PRED_DIR"
-        ls -lh "$PRED_DIR"/*.mp4
+        echo "OK: $MP4_COUNT mp4 file(s) written under $PRED_DIR"
+        find "$PRED_DIR" -name '*.mp4' -exec ls -lh {} + | tail -20
     fi
     echo ""
 done

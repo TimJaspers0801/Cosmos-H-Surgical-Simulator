@@ -92,7 +92,8 @@ CONTAINER_NAME="cosmos-h-${TASK_ID}"     # per-task container name avoids race
 WEIGHTS_DIR="/home/tjaspers/codex/weights"
 OPENH_ROOT="/nfs/data/public/Open-H"
 COSMOS_OUT="/storage/tjaspers/cosmos_output/suturebot_test"
-SCRIPTS_DIR="${HOME}/Cosmos-H-Surgical-Simulator/cluster/scripts"
+REPO_DIR="${HOME}/Cosmos-H-Surgical-Simulator"
+SCRIPTS_DIR="${REPO_DIR}/cluster/scripts"
 HF_CACHE="${HOME}/.cache/huggingface"
 
 # Per-task manifest path (merged after all tasks complete)
@@ -147,6 +148,7 @@ enroot start --rw \
     --mount "${COSMOS_OUT}:/out" \
     --mount "${HF_CACHE}:/hf" \
     --mount "${SCRIPTS_DIR}:/scripts" \
+    --mount "${REPO_DIR}/cosmos_predict2:/workspace/cosmos_predict2" \
     --env NVIDIA_VISIBLE_DEVICES=all \
     --env NVIDIA_DRIVER_CAPABILITIES=all \
     --env HF_HOME=/hf \

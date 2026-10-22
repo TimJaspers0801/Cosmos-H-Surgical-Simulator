@@ -47,6 +47,7 @@ SAVE_FPS="${SAVE_FPS:-10}"
 MAX_CHUNKS="${MAX_CHUNKS:-20}"
 SAVE_COMPARISON="${SAVE_COMPARISON:-0}"
 SAMPLE_IDX="${SAMPLE_IDX:--1}"
+NUM_SAMPLES="${NUM_SAMPLES:-1}"
 MANIFEST_PATH="${MANIFEST_PATH:-}"
 
 # PYTHONPATH must include the repo root (/workspace in STANDALONE image).
@@ -107,7 +108,9 @@ if [ "${SAVE_COMPARISON}" = "1" ]; then
 fi
 
 SAMPLE_FLAG=""
-if [ "${SAMPLE_IDX}" != "-1" ]; then
+if [ "${NUM_SAMPLES}" != "1" ]; then
+    SAMPLE_FLAG="--num_samples ${NUM_SAMPLES}"
+elif [ "${SAMPLE_IDX}" != "-1" ]; then
     SAMPLE_FLAG="--sample_idx ${SAMPLE_IDX}"
 fi
 
@@ -126,7 +129,7 @@ echo "Guidance:    $GUIDANCE"
 echo "Seed:        $SEED"
 echo "Max chunks:  $MAX_CHUNKS"
 echo "Save FPS:    $SAVE_FPS"
-echo "Sample idx:  $SAMPLE_IDX"
+echo "Num samples: $NUM_SAMPLES"
 echo "Manifest:    ${MANIFEST_PATH:-<none>}"
 echo ""
 

@@ -6,17 +6,18 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-gpu=4
 #SBATCH --mem-per-gpu=60G
-#SBATCH --time=08:00:00
-#SBATCH --array=0-119
+#SBATCH --time=24:00:00
+#SBATCH --array=0-14
 #SBATCH --output=/home/tjaspers/codex/logs/%x_%A_%a.out
 #SBATCH --error=/home/tjaspers/codex/logs/%x_%A_%a.err
 #
 # Cosmos-H SutureBot full inference — all 146 test episodes (1306-1451),
 # generating K rollout samples per episode for best-of-K IDM probing.
 #
-# Array layout: NUM_EP_SLICES × K tasks.  Each task processes one episode
-# slice for one sample index, parallelising diffusion inference across GPUs.
-#   array task ID = sample_idx * NUM_EP_SLICES + episode_slice_idx
+# Array layout: 15 tasks (one per episode slice of 10 episodes).
+# Each task loads the model once and generates all K samples for its
+# episodes sequentially.  GT data is loaded once per episode and reused
+# across samples.
 #
 # Output structure (for IDM probe):
 #   <out_root>/<embodiment>/predicted/episode_<id>/sample_<idx>.mp4
@@ -29,11 +30,11 @@
 #   K             -- samples per episode  (default: 8)
 #   BASE_SEED     -- base random seed     (default: 42)
 #
-# Timing estimate (H200):
-#   ~2-5 min/chunk, ~5-10 chunks/episode → ~15-50 min/episode
-#   10 episodes/task → ~2.5-8 h/task (8 h wall limit)
+# Timing estimate (H200, K=8):
+#   ~2-5 min/chunk, ~5-10 chunks/episode, 8 samples → ~2-7 h/episode
+#   10 episodes/task → fits within 24 h wall limit
 #
-# Prerequisites (same as smoke test):
+# Prerequisites:
 #   1. cosmos-h.sqsh at /storage/tjaspers/containers/cosmos-h.sqsh
 #   2. Model weights at /home/tjaspers/codex/weights/model_ema_bf16.pt
 #   3. Suturebot dataset at /nfs/data/public/Open-H/Surgical/jhu/imerse/suturebot/
@@ -42,10 +43,10 @@
 #   mkdir -p ~/codex/logs
 #   sbatch cluster/run_all_suturebot.sbatch                           # default K=8
 #   K=4 sbatch cluster/run_all_suturebot.sbatch                       # override K
-#   K=2 sbatch --array=0-29 cluster/run_all_suturebot.sbatch          # 2 samples, all ep slices
+#   sbatch --array=0 cluster/run_all_suturebot.sbatch                 # first 10 episodes only
 #
 # For a quick smoke test (1 episode, 2 samples):
-#   K=2 sbatch --array=0,15 cluster/run_all_suturebot.sbatch
+#   K=2 sbatch --array=0 cluster/run_all_suturebot.sbatch
 #
 set -euo pipefail
 
@@ -57,21 +58,9 @@ BASE_SEED="${BASE_SEED:-42}" # base random seed; sample i uses BASE_SEED + i*100
 FIRST_EP=1306          # first test episode (codex catalogue)
 LAST_EP=1451           # last test episode  (inclusive)
 EPS_PER_TASK=10        # episodes per array task
-NUM_EPISODES=$(( LAST_EP - FIRST_EP + 1 ))                        # 146
-NUM_EP_SLICES=$(( (NUM_EPISODES + EPS_PER_TASK - 1) / EPS_PER_TASK ))  # 15
 
-# Decompose flat array task ID → (sample_idx, episode_slice_idx)
 TASK_ID="${SLURM_ARRAY_TASK_ID}"
-SAMPLE_IDX=$(( TASK_ID / NUM_EP_SLICES ))
-EP_SLICE_IDX=$(( TASK_ID % NUM_EP_SLICES ))
-
-# Compute per-sample seed: BASE_SEED + sample_idx * 1000
-# Inside inference_open_h.py, per-chunk seed = SEED + chunk_idx, so
-# the 1000-stride leaves room for up to 1000 chunks without collision.
-SEED=$(( BASE_SEED + SAMPLE_IDX * 1000 ))
-
-# Compute episode range for this slice
-START_EP=$(( FIRST_EP + EP_SLICE_IDX * EPS_PER_TASK ))
+START_EP=$(( FIRST_EP + TASK_ID * EPS_PER_TASK ))
 END_EP=$(( START_EP + EPS_PER_TASK - 1 ))
 # Clamp to last episode
 if (( END_EP > LAST_EP )); then
@@ -84,7 +73,7 @@ for (( ep=START_EP; ep<=END_EP; ep++ )); do
     EPISODE_IDS="${EPISODE_IDS:+${EPISODE_IDS},}${ep}"
 done
 
-echo "Array task ${TASK_ID}: sample ${SAMPLE_IDX}/${K}, episodes ${START_EP}-${END_EP} → ${EPISODE_IDS}, seed ${SEED}"
+echo "Array task ${TASK_ID}: K=${K}, episodes ${START_EP}-${END_EP} → ${EPISODE_IDS}, base_seed=${BASE_SEED}"
 
 # ─── Paths ───────────────────────────────────────────────────────────────
 SQSH_PATH="/storage/tjaspers/containers/cosmos-h.sqsh"
@@ -112,8 +101,7 @@ echo "============================================================"
 echo "Job:        ${SLURM_ARRAY_JOB_ID}_${TASK_ID}"
 echo "Node:       $(hostname)"
 echo "K:          ${K}"
-echo "Sample idx: ${SAMPLE_IDX}"
-echo "Seed:       ${SEED}"
+echo "Base seed:  ${BASE_SEED}"
 echo "Episodes:   ${START_EP}-${END_EP}  (${EPISODE_IDS})"
 echo "Container:  ${SQSH_PATH}"
 echo "Weights:    ${WEIGHTS_DIR}/model_ema_bf16.pt"
@@ -159,10 +147,10 @@ enroot start --rw \
     --env DATA_SPLIT="full" \
     --env MAX_CHUNKS="20" \
     --env GUIDANCE="0" \
-    --env SEED="${SEED}" \
+    --env SEED="${BASE_SEED}" \
+    --env NUM_SAMPLES="${K}" \
     --env SAVE_FPS="10" \
     --env SAVE_COMPARISON="0" \
-    --env SAMPLE_IDX="${SAMPLE_IDX}" \
     --env MANIFEST_PATH="${CONTAINER_MANIFEST}" \
     "${CONTAINER_NAME}" \
     bash /scripts/run_inference.sh
@@ -172,20 +160,22 @@ PRED="${COSMOS_OUT}/jhu_dvrk_mono/predicted"
 EXPECTED=0
 FOUND=0
 for (( ep=START_EP; ep<=END_EP; ep++ )); do
-    EXPECTED=$(( EXPECTED + 1 ))
-    SAMPLE_FILE="${PRED}/episode_${ep}/sample_$(printf '%02d' ${SAMPLE_IDX}).mp4"
-    if [[ -f "${SAMPLE_FILE}" ]]; then
-        FOUND=$(( FOUND + 1 ))
-    else
-        echo "MISSING: ${SAMPLE_FILE}" >&2
-    fi
+    for (( s=0; s<K; s++ )); do
+        EXPECTED=$(( EXPECTED + 1 ))
+        SAMPLE_FILE="${PRED}/episode_${ep}/sample_$(printf '%02d' ${s}).mp4"
+        if [[ -f "${SAMPLE_FILE}" ]]; then
+            FOUND=$(( FOUND + 1 ))
+        else
+            echo "MISSING: ${SAMPLE_FILE}" >&2
+        fi
+    done
 done
 
 echo ""
-echo "Task ${TASK_ID} (sample ${SAMPLE_IDX}): ${FOUND}/${EXPECTED} episodes completed"
-find "${PRED}" -name "sample_$(printf '%02d' ${SAMPLE_IDX}).mp4" 2>/dev/null | sort | tail -20
+echo "Task ${TASK_ID}: ${FOUND}/${EXPECTED} videos completed (${K} samples × episodes ${START_EP}-${END_EP})"
+find "${PRED}" -path "*/episode_*/sample_*.mp4" 2>/dev/null | sort | tail -20
 if (( FOUND < EXPECTED )); then
-    echo "WARN: $(( EXPECTED - FOUND )) episode(s) missing — check logs" >&2
+    echo "WARN: $(( EXPECTED - FOUND )) video(s) missing — check logs" >&2
     exit 1
 fi
 

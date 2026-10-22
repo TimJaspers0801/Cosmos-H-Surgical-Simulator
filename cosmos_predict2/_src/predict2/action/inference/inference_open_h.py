@@ -145,9 +145,14 @@ def parse_arguments() -> argparse.Namespace:
 
     # --- Multi-sample (best-of-K) arguments ---
     parser.add_argument(
+        "--num_samples", type=int, default=1,
+        help="Number of rollout samples per episode (K for best-of-K). "
+             "When > 1, output goes to episode_{id}/sample_{idx:02d}.mp4",
+    )
+    parser.add_argument(
         "--sample_idx", type=int, default=-1,
-        help="Sample index for best-of-K generation (-1 = legacy single-sample mode). "
-             "When >= 0, output goes to episode_{id}/sample_{idx:02d}.mp4",
+        help="Generate only this single sample index (for external parallelism). "
+             "Ignored when --num_samples > 1.",
     )
     parser.add_argument(
         "--manifest_path", type=str, default=None,
@@ -323,8 +328,25 @@ def main():
     if args.save_comparison:
         os.makedirs(os.path.join(save_root, "comparison"), exist_ok=True)
 
-    multi_sample = args.sample_idx >= 0
+    # Determine sample range
+    # --num_samples K  → generate samples 0..K-1 (model loaded once)
+    # --sample_idx N   → generate only sample N  (for external parallelism)
+    # neither          → legacy single-sample mode
+    if args.num_samples > 1:
+        multi_sample = True
+        sample_range = range(args.num_samples)
+    elif args.sample_idx >= 0:
+        multi_sample = True
+        sample_range = range(args.sample_idx, args.sample_idx + 1)
+    else:
+        multi_sample = False
+        sample_range = range(1)  # single legacy sample
+
     manifest_rows = []
+
+    if multi_sample:
+        logger.info(f"Multi-sample mode: generating {len(sample_range)} sample(s) per episode "
+                     f"(indices {list(sample_range)})")
 
     # Performance tracking
     perf_stats = {
@@ -361,12 +383,8 @@ def main():
             else:
                 logger.info(f"Episode {episode_id}: {len(chunk_indices)} chunks")
 
-            predicted_chunks = []
-            gt_chunks = []
-            current_frame = None
-            episode_start_time = time.perf_counter()
-            episode_chunk_times = []
-
+            # ── Pre-load GT data (shared across all samples) ─────────
+            gt_data = []
             for chunk_idx, dataset_idx in enumerate(chunk_indices):
                 data = dataset[dataset_idx]
 
@@ -394,115 +412,129 @@ def main():
                         f"  Data shapes — video: {data['video'].shape}, "
                         f"action: {action_dim_raw}D (raw) → {actions.shape[-1]}D (padded)"
                     )
-                    current_frame = video[0]  # (H, W, C)
 
-                gt_chunks.append(video)
+                gt_data.append({"video": video, "actions": actions})
 
-                # Run inference
-                torch.cuda.synchronize()
-                chunk_start_time = time.perf_counter()
+            # ── Generate sample(s) ───────────────────────────────────
+            for s_idx in sample_range:
+                seed_base = args.seed + (s_idx * 1000 if multi_sample else 0)
+                current_frame = gt_data[0]["video"][0]  # first frame of episode
+                predicted_chunks = []
+                episode_start_time = time.perf_counter()
+                episode_chunk_times = []
 
-                next_frame, video_chunk = video2world.step_inference(
-                    img_array=current_frame,
-                    action=actions.astype(np.float32),
-                    guidance=args.guidance,
-                    seed=args.seed + chunk_idx,
-                    num_latent_conditional_frames=1,
-                )
+                sample_label = f" sample {s_idx}" if multi_sample else ""
+                logger.info(f"  Episode {episode_id}{sample_label}: seed_base={seed_base}")
 
-                torch.cuda.synchronize()
-                chunk_end_time = time.perf_counter()
-                chunk_inference_time = chunk_end_time - chunk_start_time
-                episode_chunk_times.append(chunk_inference_time)
+                for chunk_idx, chunk_data in enumerate(gt_data):
+                    actions = chunk_data["actions"]
 
-                frames_in_chunk = NUM_FRAMES - 1
-                chunk_fps = frames_in_chunk / chunk_inference_time
+                    # Run inference
+                    torch.cuda.synchronize()
+                    chunk_start_time = time.perf_counter()
 
-                predicted_chunks.append(video_chunk)
-                current_frame = next_frame
+                    next_frame, video_chunk = video2world.step_inference(
+                        img_array=current_frame,
+                        action=actions.astype(np.float32),
+                        guidance=args.guidance,
+                        seed=seed_base + chunk_idx,
+                        num_latent_conditional_frames=1,
+                    )
+
+                    torch.cuda.synchronize()
+                    chunk_end_time = time.perf_counter()
+                    chunk_inference_time = chunk_end_time - chunk_start_time
+                    episode_chunk_times.append(chunk_inference_time)
+
+                    frames_in_chunk = NUM_FRAMES - 1
+                    chunk_fps = frames_in_chunk / chunk_inference_time
+
+                    predicted_chunks.append(video_chunk)
+                    current_frame = next_frame
+
+                    logger.info(
+                        f"    Chunk {chunk_idx + 1}/{len(gt_data)} | "
+                        f"Time: {chunk_inference_time:.2f}s | FPS: {chunk_fps:.2f}"
+                    )
+
+                if not predicted_chunks:
+                    logger.warning(f"No chunks generated for episode {episode_id}{sample_label}")
+                    continue
+
+                # Episode/sample performance
+                episode_inference_time = sum(episode_chunk_times)
+                episode_frames = len(chunk_indices) * (NUM_FRAMES - 1)
+                episode_fps = episode_frames / episode_inference_time if episode_inference_time > 0 else 0
+
+                perf_stats["total_episodes"] += 1
+                perf_stats["total_chunks"] += len(chunk_indices)
+                perf_stats["total_frames_generated"] += episode_frames
+                perf_stats["total_inference_time"] += episode_inference_time
+                perf_stats["chunk_times"].extend(episode_chunk_times)
+                perf_stats["episode_times"].append(episode_inference_time)
+                perf_stats["episode_fps"].append(episode_fps)
 
                 logger.info(
-                    f"  Chunk {chunk_idx + 1}/{len(chunk_indices)} | "
-                    f"Time: {chunk_inference_time:.2f}s | FPS: {chunk_fps:.2f}"
+                    f"  Episode {episode_id}{sample_label}: {len(chunk_indices)} chunks, "
+                    f"{episode_frames} frames, {episode_inference_time:.2f}s, "
+                    f"{episode_fps:.2f} FPS"
                 )
 
-            if not predicted_chunks:
-                logger.warning(f"No chunks generated for episode {episode_id}")
-                continue
+                # Stitch chunks
+                stitched_predicted = [predicted_chunks[0]]
+                for chunk in predicted_chunks[1:]:
+                    stitched_predicted.append(chunk[1:])
+                predicted_video = np.concatenate(stitched_predicted, axis=0)
 
-            # Episode performance
-            episode_inference_time = sum(episode_chunk_times)
-            episode_frames = len(chunk_indices) * (NUM_FRAMES - 1)
-            episode_fps = episode_frames / episode_inference_time if episode_inference_time > 0 else 0
-
-            perf_stats["total_episodes"] += 1
-            perf_stats["total_chunks"] += len(chunk_indices)
-            perf_stats["total_frames_generated"] += episode_frames
-            perf_stats["total_inference_time"] += episode_inference_time
-            perf_stats["chunk_times"].extend(episode_chunk_times)
-            perf_stats["episode_times"].append(episode_inference_time)
-            perf_stats["episode_fps"].append(episode_fps)
-
-            logger.info(
-                f"Episode {episode_id}: {len(chunk_indices)} chunks, "
-                f"{episode_frames} frames, {episode_inference_time:.2f}s, "
-                f"{episode_fps:.2f} FPS"
-            )
-
-            # Stitch chunks
-            stitched_predicted = [predicted_chunks[0]]
-            for chunk in predicted_chunks[1:]:
-                stitched_predicted.append(chunk[1:])
-            predicted_video = np.concatenate(stitched_predicted, axis=0)
-
-            # Save predicted video
-            if multi_sample:
-                ep_dir = os.path.join(save_root, "predicted", f"episode_{episode_id}")
-                os.makedirs(ep_dir, exist_ok=True)
-                pred_path = os.path.join(ep_dir, f"sample_{args.sample_idx:02d}.mp4")
-            else:
-                pred_path = os.path.join(save_root, "predicted", f"episode_{episode_id:04d}.mp4")
-            mediapy.write_video(pred_path, predicted_video, fps=args.save_fps)
-            logger.info(f"Saved predicted video to {pred_path}")
-
-            # Build manifest row
-            if multi_sample:
-                manifest_rows.append({
-                    "episode_id": episode_id,
-                    "sample_idx": args.sample_idx,
-                    "seed": args.seed,
-                    "path": pred_path,
-                    "n_chunks": len(chunk_indices),
-                    "context_len": 1,
-                    "horizon": CHUNK_SIZE,
-                    "delta_t": timestep_interval,
-                    "config": {
-                        "experiment": args.experiment,
-                        "guidance": args.guidance,
-                        "max_chunks": args.max_chunks,
-                        "save_fps": args.save_fps,
-                        "num_frames": NUM_FRAMES,
-                    },
-                })
-
-            # Save comparison if requested
-            if args.save_comparison:
-                stitched_gt = [gt_chunks[0]]
-                for chunk in gt_chunks[1:]:
-                    stitched_gt.append(chunk[1:])
-                gt_video = np.concatenate(stitched_gt, axis=0)
-
-                min_len = min(len(gt_video), len(predicted_video))
-                comparison = np.concatenate([gt_video[:min_len], predicted_video[:min_len]], axis=2)
-
+                # Save predicted video
                 if multi_sample:
-                    comp_ep_dir = os.path.join(save_root, "comparison", f"episode_{episode_id}")
-                    os.makedirs(comp_ep_dir, exist_ok=True)
-                    comp_path = os.path.join(comp_ep_dir, f"sample_{args.sample_idx:02d}.mp4")
+                    ep_dir = os.path.join(save_root, "predicted", f"episode_{episode_id}")
+                    os.makedirs(ep_dir, exist_ok=True)
+                    pred_path = os.path.join(ep_dir, f"sample_{s_idx:02d}.mp4")
                 else:
-                    comp_path = os.path.join(save_root, "comparison", f"episode_{episode_id:04d}.mp4")
-                mediapy.write_video(comp_path, comparison, fps=args.save_fps)
-                logger.info(f"Saved comparison to {comp_path}")
+                    pred_path = os.path.join(save_root, "predicted", f"episode_{episode_id:04d}.mp4")
+                mediapy.write_video(pred_path, predicted_video, fps=args.save_fps)
+                logger.info(f"  Saved predicted video to {pred_path}")
+
+                # Build manifest row
+                if multi_sample:
+                    manifest_rows.append({
+                        "episode_id": episode_id,
+                        "sample_idx": s_idx,
+                        "seed": seed_base,
+                        "path": pred_path,
+                        "n_chunks": len(chunk_indices),
+                        "context_len": 1,
+                        "horizon": CHUNK_SIZE,
+                        "delta_t": timestep_interval,
+                        "config": {
+                            "experiment": args.experiment,
+                            "guidance": args.guidance,
+                            "max_chunks": args.max_chunks,
+                            "save_fps": args.save_fps,
+                            "num_frames": NUM_FRAMES,
+                        },
+                    })
+
+                # Save comparison if requested
+                if args.save_comparison:
+                    gt_chunks = [d["video"] for d in gt_data]
+                    stitched_gt = [gt_chunks[0]]
+                    for chunk in gt_chunks[1:]:
+                        stitched_gt.append(chunk[1:])
+                    gt_video = np.concatenate(stitched_gt, axis=0)
+
+                    min_len = min(len(gt_video), len(predicted_video))
+                    comparison = np.concatenate([gt_video[:min_len], predicted_video[:min_len]], axis=2)
+
+                    if multi_sample:
+                        comp_ep_dir = os.path.join(save_root, "comparison", f"episode_{episode_id}")
+                        os.makedirs(comp_ep_dir, exist_ok=True)
+                        comp_path = os.path.join(comp_ep_dir, f"sample_{s_idx:02d}.mp4")
+                    else:
+                        comp_path = os.path.join(save_root, "comparison", f"episode_{episode_id:04d}.mp4")
+                    mediapy.write_video(comp_path, comparison, fps=args.save_fps)
+                    logger.info(f"  Saved comparison to {comp_path}")
 
         except Exception as e:
             logger.error(f"Error processing episode {episode_id}: {e}")
